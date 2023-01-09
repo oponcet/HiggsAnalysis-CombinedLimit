@@ -12,6 +12,7 @@
 #include "Rtypes.h"
 #include "TH1F.h"
 #include "TMatrix.h"
+#include "TSpline.h"
 #include "HiggsAnalysis/CombinedLimit/interface/CMSHistV.h"
 #include "HiggsAnalysis/CombinedLimit/interface/FastTemplate_Old.h"
 #include "HiggsAnalysis/CombinedLimit/interface/SimpleCacheSentry.h"
@@ -32,6 +33,8 @@ class CMSHistFunc : public RooAbsReal {
     std::vector<double> sigmas;
     std::vector<double> slopes;
     std::vector<double> offsets;
+    std::vector<TGraph> bin_vals;
+    std::vector<TSpline3> spline_interps;
   };
 
   struct Cache {
@@ -60,7 +63,7 @@ class CMSHistFunc : public RooAbsReal {
   };
 
  public:
-  enum HorizontalType { Closest, Integral, Moment };
+  enum HorizontalType { Closest, Integral, Moment, PerBinSpline };
 
   enum MomentSetting {
     Linear,
@@ -158,8 +161,8 @@ class CMSHistFunc : public RooAbsReal {
  protected:
   RooRealProxy x_;
   RooListProxy vmorphs_;
-  RooListProxy hmorphs_;
-  std::vector<std::vector<double>> hpoints_;
+  RooListProxy hmorphs_; 
+  std::vector<std::vector<double>> hpoints_; // values of tes for which the templates are generated in the inputs
   mutable SimpleCacheSentry vmorph_sentry_;  //! not to be serialized
   mutable SimpleCacheSentry hmorph_sentry_;  //! not to be serialized
 

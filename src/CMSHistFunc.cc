@@ -9,6 +9,8 @@
 #include "RooAbsData.h"
 #include "RooAbsReal.h"
 #include "TH1F.h"
+#include "TFile.h"
+#include "TCanvas.h"
 #include "TVector.h"
 #include "TMatrix.h"
 #include "vectorized.h"
@@ -46,7 +48,7 @@ CMSHistFunc::CMSHistFunc(const char* name, const char* title, RooRealVar& x,
       htype_(HorizontalType::Integral),
       mtype_(MomentSetting::Linear),
       vtype_(VerticalSetting::QuadLinear),
-      divide_by_width_(divide_by_width),
+      divide_by_width_(true),
       vsmooth_par_(1.0),
       fast_vertical_(false) {
   if (divide_by_width_) {
@@ -121,7 +123,7 @@ CMSHistFunc::CMSHistFunc(CMSHistFunc const& other, const char* name)
       divide_by_width_(other.divide_by_width_),
       vsmooth_par_(other.vsmooth_par_),
       fast_vertical_(false) {
-  // initialize();
+      //initialize();
 }
 
 void CMSHistFunc::initialize() const {
@@ -163,6 +165,7 @@ void CMSHistFunc::setGlobalCache() const {
         M(i, j) = std::pow(dm[i], (double)j);
       }
     }
+    M.SetTol(1.e-60);
     global_.m = M.Invert();
 
     global_.c_scale.resize(hpoints_[0].size(), 0.);
@@ -172,7 +175,43 @@ void CMSHistFunc::setGlobalCache() const {
     global_.sigmas.resize(hpoints_[0].size(), 0.);
     global_.slopes.resize(hpoints_[0].size(), 0.);
     global_.offsets.resize(hpoints_[0].size(), 0.);
+    
+
+    std::cout << ">>>>>>> Writing splines" << std::endl; 
+    //Writing the bin content to a root file
+    TFile fout(TString::Format("spline/spline_test_%s.root", this->GetName()), "RECREATE");
+    // create a canvas
+    TCanvas* canvas = new TCanvas("canvas", "", 800, 600);
+    for (unsigned ib = 0; ib < cache_.size(); ++ib) { // for each bin 
+      std::vector<double> contents(hpoints_[0].size(), 0.); // bin content
+      for (unsigned i = 0; i < hpoints_[0].size(); ++i) { // for each tes point 
+        contents[i] = storage_[getIdx(0, i, 0, 0)][ib];
+      }
+      global_.bin_vals.emplace_back(hpoints_[0].size(), hpoints_[0].data(), contents.data());
+      double* non_const_hpoint = const_cast<double*>(hpoints_[0].data());
+      TSpline3 *spline = new TSpline3("Cubic Spline", non_const_hpoint, contents.data(), hpoints_[0].size(), "b2e2", 0, 0);
+      for (unsigned i = 0; i < hpoints_[0].size(); ++i) {
+        spline->Eval(i);
+      }
+      global_.spline_interps.emplace_back(*spline);
+      TGraph graph = global_.bin_vals.back();
+      canvas->cd();
+      spline->SetLineColor(kRed);
+      //global_.bin_vals.back().Draw("hist p");
+      graph.Draw("hist p");
+      spline->Draw("sames");
+      // global_.bin_vals.back().Write(TString::Format("bin_%i", ib));
+      // global_.spline_interps.back().Write(TString::Format("bin_%i", ib));
+      graph.Write(TString::Format("bin_%i", ib));
+      spline->Write(TString::Format("bin_%i", ib));
+      canvas->Write(TString::Format("bin_%i", ib));
+      delete spline;
+      graph.Delete();
+    }
+    delete canvas;
+    fout.Close();
   }
+
 }
 
 void CMSHistFunc::setActiveBins(unsigned bins) {
@@ -225,7 +264,7 @@ void CMSHistFunc::prepareStorage() {
   if (hmorphs_.getSize() == 1) {
     n_hpoints = hpoints_[0].size();
   }
-  unsigned n_vpoints = vmorphs_.getSize();
+ unsigned n_vpoints = vmorphs_.getSize();
   storage_.resize(n_hpoints * (1 + n_vpoints * 2));
 #if HFVERBOSE > 0
   std::cout << "Storage size set to: " << storage_.size() << "\n";
@@ -239,9 +278,10 @@ void CMSHistFunc::setShape(unsigned hindex, unsigned hpoint, unsigned vindex,
 #if HFVERBOSE > 0
   std::cout << "hindex: " << hindex << " hpoint: " << hpoint
             << " vindex: " << vindex << " vpoint: " << vpoint
-            << " mapped to idx: " << idx << "\n";
+            << " mapped to idx: " << idx << "\n"; // bin
 #endif
-  storage_.at(idx) = FastHisto(hist);
+  storage_.at(idx) = FastHisto(hist); //hist of the process (ex:DM0_ZTT)
+
   if (divide_by_width_) {
     for (unsigned i = 0; i < storage_[idx].size(); ++i) {
       storage_.at(idx)[i] /= cache_.GetWidth(i);
@@ -496,6 +536,16 @@ void CMSHistFunc::updateCache() const {
 #if HFVERBOSE > 0
       std::cout << "Checking step 1 (single point)\n";
 #endif
+      if (htype_ == HorizontalType::PerBinSpline) {
+        //unsigned idx = getIdx(0, global_.p1, 0, 0);
+        // Use the splines evaluated for each bin to update the cache
+          std::cout << "PerBinSpline" << std::endl;
+          //mcache_[idx].step2 = global_.spline_interps[idx];
+          //global_.spline_interps;
+        
+      }
+ 
+
       for (int v = 0; v < vmorphs_.getSize() + 1; ++v) {
         unsigned idx = getIdx(0, global_.p1, 0, 0);
         if (v == 0) {
@@ -604,6 +654,11 @@ Double_t CMSHistFunc::evaluate() const {
   return cache().GetAt(x_);
 }
 
+//  hpoint : value of the morph variable 
+//  hindex : index of the horizontal morph inputs
+//  vindex : vertical morph index (0 for nominal)
+//  vpoint : up or down template (when vindex is > 0)
+// function that should be locating the requested template among all the horizontal and vertical morph inputs 
 unsigned CMSHistFunc::getIdx(unsigned hindex, unsigned hpoint, unsigned vindex,
                              unsigned vpoint) const {
   unsigned n_vpoints = vmorphs_.getSize();
@@ -618,9 +673,13 @@ inline double CMSHistFunc::smoothStepFunc(double x) const {
   return 0.125 * xnorm * (xnorm2 * (3. * xnorm2 - 10.) + 15);
 }
 
+//  Set the cumulative distribution function (CDF) of a given FastTemplate h
+//  and stores it in the c.cdf field of the Cache object c.
 void CMSHistFunc::setCdf(Cache& c, FastTemplate const& h) const {
   c.cdf = FastTemplate(h.size() + 1);
   c.integral = integrateTemplate(h);
+  // The CDF of h is calculated by iterating over the bins of h and adding up 
+  // the area of each bin, normalized by c.integral, to the previous value of the CDF. 
   for (unsigned i = 1; i < c.cdf.size(); ++i) {
     c.cdf[i] = (h[i - 1] * cache_.GetWidth(i-1)) / c.integral + c.cdf[i - 1];
   }
@@ -914,6 +973,8 @@ void CMSHistFunc::prepareInterpCache(Cache& c1,
   c1.interp_set = true;
 }
 
+// Returns a FastTemplate object which is the result of morphing the CDF (Cumulative Distribution Function)
+// at index idx using the parameters par1 and par2 and the interpolation parameter parinterp.
 FastTemplate CMSHistFunc::cdfMorph(unsigned idx, double par1, double par2,
                                  double parinterp) const {
   double wt1;
